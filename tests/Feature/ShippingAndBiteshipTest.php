@@ -269,3 +269,55 @@ test('handover transitions order directly to COMPLETED for self_pickup', functio
 
     expect($order->fresh()->status)->toBe(OrderStateMachine::STATE_COMPLETED);
 });
+
+test('NotificationService creates 6 templates and triggers automatic WhatsApp fallback on FCM failure', function () {
+    Queue::fake();
+
+    $notificationService = app(NotificationService::class);
+
+    $order = Order::create([
+        'order_code' => 'ORD-NOTIF-001',
+        'merchant_id' => 1,
+        'supplier_id' => 2,
+        'status' => 'BOOKING_REQUESTED',
+    ]);
+
+    // 1. ORDER_CREATED
+    $n1 = $notificationService->notifyOrderCreated($order, 2, '081234567890');
+    expect($n1->type)->toBe(NotificationService::TYPE_ORDER_CREATED)
+        ->and($n1->title)->toContain('Pesanan Baru Masuk');
+
+    // 2. PAYMENT_UPLOADED
+    $n2 = $notificationService->notifyPaymentUploaded($order, 2, 500000, '081234567890');
+    expect($n2->type)->toBe(NotificationService::TYPE_PAYMENT_UPLOADED);
+
+    // 3. PAYMENT_CONFIRMED
+    $n3 = $notificationService->notifyPaymentConfirmed($order, 1, 'TB Berkah', '081298765432');
+    expect($n3->type)->toBe(NotificationService::TYPE_PAYMENT_CONFIRMED);
+
+    // 4. COURIER_DISPATCHED
+    $n4 = $notificationService->notifyCourierDispatched($order, 1, 'GoSend', 'https://biteship.com/track/123', '081298765432');
+    expect($n4->type)->toBe(NotificationService::TYPE_COURIER_DISPATCHED);
+
+    // 5. DEPOSIT_LOW_ALERT
+    $n5 = $notificationService->notifyDepositLowAlert(2, 45000, '081234567890');
+    expect($n5->type)->toBe(NotificationService::TYPE_DEPOSIT_LOW_ALERT);
+
+    // 6. ORDER_COMPLETED
+    $n6 = $notificationService->notifyOrderCompleted($order, 1, '081298765432');
+    expect($n6->type)->toBe(NotificationService::TYPE_ORDER_COMPLETED);
+
+    // Verify SendNotificationJob was pushed to notifications-high queue
+    Queue::assertPushedOn('notifications-high', \App\Domain\Notification\Jobs\SendNotificationJob::class);
+
+    // Test WhatsApp Fallback Delivery:
+    // With FCM service account unconfigured, FCM will fail and WhatsApp will be triggered
+    Http::fake([
+        '*/send' => Http::response(['status' => true], 200),
+    ]);
+
+    $notificationService->processDelivery($n4, '081298765432');
+    $updated = $n4->fresh();
+    expect($updated->channel_status['fcm'])->toBe('failed')
+        ->and($updated->channel_status['whatsapp'])->toBe('sent');
+});
