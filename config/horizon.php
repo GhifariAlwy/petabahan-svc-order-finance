@@ -197,14 +197,21 @@ return [
     */
 
     'defaults' => [
-        'supervisor-1' => [
+        'supervisor-notifications' => [
+            'connection' => 'redis',
+            'queue' => ['notifications-high', 'notifications'],
+            'balance' => 'simple',
+            'maxProcesses' => 3,
+            'memory' => 128,
+            'tries' => 3,
+            'timeout' => 30,
+            'nice' => 0,
+        ],
+        'supervisor-default' => [
             'connection' => 'redis',
             'queue' => ['default'],
             'balance' => 'auto',
-            'autoScalingStrategy' => 'time',
-            'maxProcesses' => 1,
-            'maxTime' => 0,
-            'maxJobs' => 0,
+            'maxProcesses' => 2,
             'memory' => 128,
             'tries' => 1,
             'timeout' => 60,
