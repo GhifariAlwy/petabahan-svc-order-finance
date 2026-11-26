@@ -101,11 +101,12 @@ class BiteshipClient
      */
     public function verifyWebhookSignature(string $rawPayload, ?string $signature): bool
     {
-        if (empty($signature) || empty($this->webhookSecret)) {
+        $secret = $this->webhookSecret ?: config('services.biteship.webhook_secret', '');
+        if (empty($signature) || empty($secret)) {
             return false;
         }
 
-        $expectedSignature = hash_hmac('sha256', $rawPayload, $this->webhookSecret);
+        $expectedSignature = hash_hmac('sha256', $rawPayload, $secret);
 
         return hash_equals($expectedSignature, $signature);
     }

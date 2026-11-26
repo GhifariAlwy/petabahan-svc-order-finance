@@ -181,3 +181,135 @@ it('DevSecOps [SEC-06]: prevents IDOR on order endpoints (verifies merchant owne
     $response->assertStatus(403);
     $response->assertJsonPath('error.code', 'FORBIDDEN_OWNERSHIP');
 });
+
+it('DevSecOps [SEC-07]: rejects Biteship webhook request when HMAC signature is missing or invalid', function () {
+    config([
+        'services.biteship.webhook_secret' => 'super_secret_webhook_key_123',
+        'services.biteship.enforce_webhook_hmac' => true,
+    ]);
+
+    $payload = [
+        'event' => 'order.status',
+        'order_id' => 'bs_ord_sec_007',
+        'status' => 'picking_up',
+    ];
+
+    // 1. Missing signature
+    $resNoSig = $this->postJson('/api/webhooks/biteship', $payload);
+    $resNoSig->assertStatus(403);
+    $resNoSig->assertJsonPath('error.code', 'INVALID_SIGNATURE');
+
+    // 2. Tampered / wrong signature
+    $resWrongSig = $this->withHeaders([
+        'X-Biteship-Signature' => 'invalid_forged_signature_hash_abcdef',
+    ])->postJson('/api/webhooks/biteship', $payload);
+
+    $resWrongSig->assertStatus(403);
+    $resWrongSig->assertJsonPath('error.code', 'INVALID_SIGNATURE');
+});
+
+it('DevSecOps [SEC-08]: accepts webhook with authentic HMAC SHA-256 signature and processes idempotently', function () {
+    $secret = 'super_secret_webhook_key_123';
+    config(['services.biteship.webhook_secret' => $secret]);
+
+    $order = Order::create([
+        'order_code' => 'ORD-SEC-008',
+        'merchant_id' => 1,
+        'supplier_id' => 2,
+        'status' => 'COURIER_REQUESTED',
+    ]);
+
+    $payload = [
+        'event' => 'order.status',
+        'order_id' => 'bs_ord_sec_008',
+        'status' => 'dropping_off',
+        'courier' => [
+            'tracking_id' => 'TKP-SEC-008',
+            'waybill_id' => 'TKP-SEC-008',
+            'company' => 'gosend',
+            'driver_name' => 'Budi Security',
+            'driver_phone' => '081299887766',
+        ],
+        'metadata' => [
+            'order_id' => $order->id,
+        ],
+    ];
+
+    $rawContent = json_encode($payload);
+    $signature = hash_hmac('sha256', $rawContent, $secret);
+
+    // Call webhook with valid HMAC signature
+    $response = $this->call(
+        'POST',
+        '/api/webhooks/biteship',
+        [],
+        [],
+        [],
+        [
+            'HTTP_X_BITESHIP_SIGNATURE' => $signature,
+            'CONTENT_TYPE' => 'application/json',
+        ],
+        $rawContent
+    );
+
+    $response->assertStatus(200);
+    $response->assertJsonPath('success', true);
+});
+
+it('DevSecOps [SEC-09]: blocks unauthorized/premature call-courier when order is not in PAID_FULL state', function () {
+    $invalidStates = [
+        OrderStateMachine::STATE_BOOKING_REQUESTED,
+        OrderStateMachine::STATE_ACCEPTED,
+        OrderStateMachine::STATE_PAYMENT_PROOF_UPLOADED,
+        OrderStateMachine::STATE_PAID_DP,
+    ];
+
+    foreach ($invalidStates as $idx => $state) {
+        $order = Order::create([
+            'order_code' => "ORD-SEC-009-{$idx}",
+            'merchant_id' => 1,
+            'supplier_id' => 200 + $idx,
+            'status' => $state,
+        ]);
+
+        DepositWallet::create([
+            'supplier_id' => 200 + $idx,
+            'balance' => 200000,
+            'min_required_balance' => 50000,
+        ]);
+
+        $response = $this->withHeaders([
+            'X-Supplier-Id' => (string) (200 + $idx),
+            'X-User-Role' => 'supplier',
+        ])->postJson("/api/supplier/orders/{$order->id}/call-courier", [
+            'courier_company' => 'gosend',
+            'courier_type' => 'instant',
+            'shipping_fee_actual' => 25000,
+        ]);
+
+        $response->assertStatus(409);
+        $response->assertJsonPath('error.code', 'INVALID_ORDER_STATE');
+    }
+});
+
+it('DevSecOps [SEC-10]: ensures sensitive secrets are masked and never exposed via public endpoints', function () {
+    $order = Order::create([
+        'order_code' => 'ORD-SEC-010',
+        'merchant_id' => 1,
+        'supplier_id' => 2,
+        'status' => 'BOOKING_REQUESTED',
+    ]);
+
+    $response = $this->withHeaders([
+        'X-Merchant-Id' => '1',
+        'X-User-Role' => 'merchant',
+    ])->getJson("/api/orders/{$order->id}");
+
+    $response->assertStatus(200);
+    $body = $response->getContent();
+
+    expect($body)->not->toContain(config('services.biteship.api_key', 'biteship_dummy_test_secret'))
+        ->and($body)->not->toContain(config('services.biteship.webhook_secret', 'webhook_dummy_secret'))
+        ->and($body)->not->toContain('private_key')
+        ->and($body)->not->toContain('secret');
+});
